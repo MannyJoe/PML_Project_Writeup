@@ -1,0 +1,211 @@
+---
+title: "Practical Machine Learning - Prediction Assignment"
+author: "Manny Joe"
+date: "November 18, 2015"
+output: html_document
+---
+
+## Background  
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively.
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.
+
+In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+## Submission Instructions
+
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should 
+
+  a) create a report describing how you built your model, 
+  b) how you used cross validation, 
+  c) what you think the expected out of sample error is, and 
+  d) why you made the choices you did. 
+
+You will also use your prediction model to predict 20 different test cases. 
+
+1. Your submission should consist of a link to a Github repo with your R markdown and compiled HTML file describing your analysis. Please constrain the text of the writeup to < 2000 words and the number of figures to be less than 5. It will make it easier for the graders if you submit a repo with a gh-pages branch so the HTML page can be viewed online (and you always want to make it easy on graders :-).
+
+2. You should also apply your machine learning algorithm to the 20 test cases available in the test data above. Please submit your predictions in appropriate format to the programming assignment for automated grading. See the programming assignment for additional details. 
+
+## Package Preperation
+
+Clear memory and check to see if "caret", "rpart", "rpart.plot", "randomForest", "corrplot", "rattle", and "RCurl" R packages are installed. (Package names are case sensitive).  Load required libraries.
+
+```{r, cache = T}
+ls()
+rm(list=ls())
+
+  packages <- c("caret", "rpart", "rpart.plot", "randomForest", "e1071", "corrplot",
+                          "rattle", "RCurl")
+  sapply(packages, require, character.only = TRUE, quietly = TRUE)
+
+# Install required packages
+
+  # install.packages("caret")
+  # install.packages("rpart")
+  # install.packages("rpart.plot")
+  # install.packages("randomForest")
+  # install.packages("e1071")
+  # install.packages("corrplot")
+  # install.packages("rattle")
+  # install.packages("RCurl")
+
+# Load needed packages
+            
+library(caret)        # Classification and Regression Training
+library(rpart)        # Recursive Partitioning and Regression Trees
+library(rpart.plot)   # An Enhanced Version of plot.rpart, which plots an Rpart Object
+library(randomForest) # Classification and Regression with Random Forest
+library(e1071)        # Misc Functions of the Department of Statistics (e1071), TU Wien
+                        # (Needed for Random Forest)
+library(corrplot)     # A visualization of a correlation matrix.
+library(rattle)       # Rattle user interface using the RGtk2 package
+                        # (Graphical interface using Gtk, the Gimp Tool Kit.)
+library(RCurl)        # General network (HTTP/FTP/...) client interface for R
+``` 
+
+## Get the Data
+
+Obtain data from from this source: http://groupware.les.inf.puc-rio.br/har. 
+
+The training data for this project are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+For Windows users, set the computer to use Internet Explorer per discussion in prior Data Science specialization class.  
+
+```{r, cache = T}
+setInternet2(use = TRUE)
+
+trainUrl <-"http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+trainFile <- "./data/pml-training.csv"
+testFile  <- "./data/pml-testing.csv"
+if (!file.exists("./data")) {
+  dir.create("./data")
+}
+if (!file.exists(trainFile)) {
+  download.file(trainUrl, destfile=trainFile, method="curl")
+}
+if (!file.exists(testFile)) {
+  download.file(testUrl, destfile=testFile, method="curl")
+}
+```  
+
+### Read the Data
+
+After obtaining the data, read the csv files into data frames.  
+
+```{r, cache = T}
+trainRaw <- read.csv("./data/pml-training.csv")
+testRaw <- read.csv("./data/pml-testing.csv")
+dim(trainRaw)
+dim(testRaw)
+```
+
+The training data set contains 19,622 observations with 160 variables and the testing data set contains 20 observations with 160 variables. 
+
+We will be predicting the "classe" variable in the training set (the manner in which they did the exercise). 
+
+## Clean the Data
+
+Fix observations with missing or erroneous variables and remove columns that contain NA or missing values.
+
+```{r, cache = T}
+sum(complete.cases(trainRaw))
+trainRaw <- trainRaw[, colSums(is.na(trainRaw)) == 0] 
+testRaw <- testRaw[, colSums(is.na(testRaw)) == 0] 
+```  
+
+Remove columns that do not provide predictive values (no accelerometer measurements).
+
+```{r, cache = T}
+classe <- trainRaw$classe
+trainRemove <- grepl("^X|timestamp|window", names(trainRaw))
+trainRaw <- trainRaw[, !trainRemove]
+trainCleaned <- trainRaw[, sapply(trainRaw, is.numeric)]
+trainCleaned$classe <- classe
+testRemove <- grepl("^X|timestamp|window", names(testRaw))
+testRaw <- testRaw[, !testRemove]
+testCleaned <- testRaw[, sapply(testRaw, is.numeric)]
+dim(trainCleaned)
+dim(testCleaned)
+```
+The cleaned training data set now contains 19,622 observations (unchanged) with 53 variables (107 fewer than raw) and the testing data set contains 20 observations with 53 variables (107 fewer than raw). 
+
+### Slice the data
+
+Split the cleaned training set into a training data set (80%) and a validation data set (20%).  We can use the validation data set to conduct cross validation.
+
+```{r, cache = T}
+set.seed(9000)
+inTrain <- createDataPartition(trainCleaned$classe, p=0.80, list=F) # Changed from .70
+trainData <- trainCleaned[inTrain, ]
+testData <- trainCleaned[-inTrain, ]
+```
+
+## Modeling
+
+I'll create a predictive model using **Random Forest** a classification and regression R package based on a forest of trees using random inputs.  The class lecture on **Random Forest** states that the "pro" is "accuracy," able to classify large amounts of data with accuracy.
+
+I'll use **5-fold cross validation** when applying the algorithm, which will generate 80%/20% training/validation split.
+
+```{r, cache = T}
+controlRf <- trainControl(method="cv", 5)
+modelRf <- train(classe ~ ., data=trainData, method="rf", trControl=controlRf, ntree=250)
+modelRf
+```
+
+Apply the Random Forest Model on the validation data set.  
+
+```{r, cache = T}
+predictRf <- predict(modelRf, testData)
+confusionMatrix(testData$classe, predictRf)
+```
+
+## Estimated Accuracy and Out-of-Sample Error
+
+Determine the estimated accuracy and out-of-sample error of the model.
+
+```{r, cache = T}
+accuracy <- postResample(predictRf, testData$classe)
+accuracy
+ooSE <- 1 - as.numeric(confusionMatrix(testData$classe, predictRf)$overall[1])
+ooSE
+```
+
+The results show tha the estimated accuracy of the model is 99.36% and the estimated out-of-sample error is 0.63%.
+
+## Figure 1. Confusion Matrix Using Pie Method
+
+Visualizing Confusion Matrix to test results
+
+```{r, cache = T}
+corrPlot <- cor(trainData[, -length(names(trainData))])
+corrplot(corrPlot, method="pie")
+```
+
+## Predicting for Test Data Set
+
+I'll apply the Random Forest Model on the testing data set. (Removing `problem_id` column for prediction model).  
+
+```{r, cache = T}
+result <- predict(modelRf, testCleaned[, -length(names(testCleaned))])
+result
+```  
+
+## Figure 2. Fancy Decision Tree
+
+```{r, cache = T}
+treeModel <- rpart(classe ~ ., data=trainData, method="class")
+fancyRpartPlot(treeModel) 
+```
+
+These figures may be difficult to read, figure 3 presents a simplified version.
+
+## Figure 3. Decision Tree
+
+```{r, cache = T}
+treeModel <- rpart(classe ~ ., data=trainData, method="class")
+prp(treeModel) 
+```
